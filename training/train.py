@@ -541,9 +541,9 @@ def parse_args():
                         default=0.0005, help="Weight decay")
     parser.add_argument("--momentum", type=float,
                         default=0.90, help="Momentum")
-    parser.add_argument("--data-dir", type=str, default="./data",
+    parser.add_argument("--data-dir", type=str, default="/opt/ml/input/data",
                         help="Directory where dataset is stored")
-    parser.add_argument("--model-dir", type=str, default=".",
+    parser.add_argument("--model-dir", type=str, default="/opt/ml/model",
                         help="Directory to save the trained model")
     parser.add_argument("--load-weights", action="store_true",
                         help="Flag to load existing weights")
