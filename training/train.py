@@ -121,7 +121,7 @@ def get_data_loaders(data_dir, batch_size=BATCH_SIZE, num_workers=4):
 # train_utils.py
 
 
-def train_model(model, train_loader, validation_loader, num_epochs=NUM_EPOCHS, loss_function=None):
+def train_model(model, train_loader, validation_loader, model_output_dir, num_epochs=NUM_EPOCHS, loss_function=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on device '{device}'.")
     if loss_function is None:
@@ -164,7 +164,9 @@ def train_model(model, train_loader, validation_loader, num_epochs=NUM_EPOCHS, l
         print(
             f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}")
         if epoch == 0 or avg_val_loss < min(val_losses[:-1]):
-            torch.save(model.state_dict(), f'model_{int(time.time())}.pth')
+            model_path = os.path.join(
+                model_output_dir, f'model_{int(time.time())}.pth')
+            torch.save(model.state_dict(), model_path)
     return model
 
 
@@ -576,7 +578,7 @@ def main():
     loss_function = YOLOLoss()
 
     # Train the model
-    model = train_model(model, train_loader, val_loader,
+    model = train_model(model, train_loader, val_loader, args.model_dir,
                         num_epochs=args.epochs, loss_function=loss_function)
     model.eval()
 
