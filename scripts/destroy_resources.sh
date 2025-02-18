@@ -6,6 +6,7 @@
 set -e
 
 # ***** USER-SPECIFIC PARAMETERS *****
+export AWS_PROFILE=sagemaker
 PROJECT_NAME="yolo"
 NOTEBOOK_INSTANCE_NAME="${PROJECT_NAME}-notebook"
 LIFECYCLE_CONFIG_NAME="${PROJECT_NAME}-lifecycle-config"

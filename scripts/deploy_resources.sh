@@ -11,7 +11,7 @@ PROJECT_NAME="yolo"
 NOTEBOOK_INSTANCE_NAME="${PROJECT_NAME}-notebook"
 LIFECYCLE_CONFIG_NAME="${PROJECT_NAME}-lifecycle-config"
 # This lifecycle script downloads the Pascal VOC2007 training/validation tarball and uploads it to S3.
-LIFECYCLE_SCRIPT=lifecycle_script.sh
+LIFECYCLE_SCRIPT=scripts/lifecycle_script.sh
 SECURITY_GROUP_NAME="${PROJECT_NAME}-sg"
 BUCKET="sagemaker-20250212110251"
 REGION="us-east-1"
