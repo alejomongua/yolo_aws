@@ -556,7 +556,7 @@ def main():
     args = parse_args()
 
     # Load datasets and data loaders (assumes data has been preprocessed if desired)
-    train_dataset, val_dataset, test_dataset = get_datasets()
+    train_dataset, val_dataset, test_dataset = get_datasets(args.data_dir)
     train_loader, val_loader, test_loader = get_data_loaders(
         train_dataset, val_dataset, test_dataset)
 
