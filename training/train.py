@@ -66,7 +66,6 @@ def collate_fn(batch):
     grid_size = GRID_SIZE
     num_boxes = NUMBER_OF_BBOXES
     num_classes = NUMBER_OF_CLASSES
-    image_size = IMAGE_SIZE  # Assuming a square image
 
     for img, target in batch:
         images.append(img)
@@ -187,9 +186,6 @@ def get_data_loaders(data_dir, batch_size=BATCH_SIZE, num_workers=4):
     test_loader = DataLoader(test_dataset, batch_size=batch_size,
                              shuffle=False, num_workers=num_workers, collate_fn=collate_fn)
     return train_loader, val_loader, test_loader
-
-
-# train_utils.py
 
 
 def train_model(model, train_loader, validation_loader, model_output_dir, accelerator, num_epochs=10, loss_function=None, hook=None):
@@ -704,8 +700,24 @@ def main():
         except Exception as e:
             print("Could not create SM Debugger hook, continuing without debugger:", e)
 
+    # Create a temp dir for the dataset
+    temp_dir = os.path.join('/tmp', 'data')
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+        print(f"Created temp dir {temp_dir}")
+
+    # Uncompress datasets files
+    for filename in os.listdir(args.data_dir):
+        if filename.endswith('.tar.gz'):
+            print(f"Uncompressing {filename}...")
+            basename = filename.split('.')[0]
+            full_path = os.path.join(args.data_dir, filename)
+            dest_path = os.path.join(temp_dir, basename)
+            os.makedirs(dest_path, exist_ok=True)
+            os.system(f'tar -xzf {full_path} -C {dest_path}')
+
     # Load datasets and data loaders.
-    train_loader, val_loader, test_loader = get_data_loaders(args.data_dir)
+    train_loader, val_loader, test_loader = get_data_loaders(temp_dir)
 
     # Check for existing weights.
     weights = None

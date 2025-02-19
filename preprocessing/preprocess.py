@@ -90,13 +90,18 @@ def process_sample(image_path, annot_path, target_size):
     return image_np, boxes
 
 
-def process_and_save_files(image_files, voc_root, dest_dir, target_size):
+def process_and_save_files(image_files, voc_root, dest_file, target_size):
     """
     For each image in image_files, process the image and corresponding annotation.
     Save the result as a compressed .npz file.
     """
+    dest_dir = os.path.dirname(dest_file)
     os.makedirs(dest_dir, exist_ok=True)
     annots_dir = os.path.join(voc_root, "Annotations")
+
+    # Create temp dir
+    temp_dir = os.path.join("/tmp", "voc_temp")
+    os.makedirs(temp_dir, exist_ok=True)
 
     for img_path in image_files:
         base = os.path.basename(img_path)
@@ -108,11 +113,23 @@ def process_and_save_files(image_files, voc_root, dest_dir, target_size):
             continue
         try:
             image_np, boxes = process_sample(img_path, annot_path, target_size)
-            out_path = os.path.join(dest_dir, f"{name}.npz")
+            out_path = os.path.join(temp_dir, f"{name}.npz")
             np.savez_compressed(out_path, image=image_np, boxes=boxes)
         except Exception as e:
             print(f"Error processing {name}: {e}")
-    print(f"Processed samples saved to {dest_dir}")
+    print(f"Processed samples saved to {temp_dir}")
+
+    # Compress temp_dir into dest_file
+    with tarfile.open(dest_file, "w:gz") as tar:
+        for archivo in os.listdir(temp_dir):
+            ruta_completa = os.path.join(temp_dir, archivo)
+            # Al agregar usamos el nombre del archivo como arcname para omitir la ruta original
+            tar.add(ruta_completa, arcname=archivo)
+
+    print(f"Compressed {temp_dir} into {dest_file}")
+
+    # Remove temp_dir
+    shutil.rmtree(temp_dir)
 
 
 def main(args):
@@ -160,9 +177,10 @@ def main(args):
 
     # For each split, process the images and annotations and save as .npz files.
     for split_name, files in zip(["train", "val", "test"], [train_files, val_files, test_files]):
-        dest_dir = os.path.join(output_dir, split_name)
+        dest_file = os.path.join(output_dir, split_name)
+        dest_file = f"{dest_file}.tar.gz"
         print(f"Processing {split_name} split...")
-        process_and_save_files(files, voc_root, dest_dir, args.image_size)
+        process_and_save_files(files, voc_root, dest_file, args.image_size)
 
     print("Preprocessing complete.")
 
