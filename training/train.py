@@ -13,9 +13,12 @@ import numpy as np
 from PIL import Image
 from sklearn.metrics import average_precision_score
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.clip_grad import clip_grad_norm_
 from torchvision import transforms
 from tqdm import tqdm
+from accelerate import Accelerator
+
+# Import SM Debugger for PyTorch
+import smdebug.pytorch as smd
 
 NUMBER_OF_CLASSES = 20  # VOC has 20 classes
 GRID_SIZE = 7           # 7x7 grid
@@ -50,6 +53,74 @@ VOC_LABELS = {
 
 # Derived constants
 CLASS_LABELS = list(VOC_LABELS.keys())
+
+
+def collate_fn(batch):
+    """
+    Custom collate function for the data loader that handles multiple objects in the same grid cell
+    without overwriting bounding boxes.
+    """
+    images = []
+    targets = []
+
+    grid_size = GRID_SIZE
+    num_boxes = NUMBER_OF_BBOXES
+    num_classes = NUMBER_OF_CLASSES
+    image_size = IMAGE_SIZE  # Assuming a square image
+
+    for img, target in batch:
+        images.append(img)
+        target_tensor = torch.zeros(
+            [num_boxes * 5 + num_classes, grid_size, grid_size])
+
+        x_center_array, y_center_array, width_array, height_array, names = target.T
+
+        # Track which boxes have been filled in each cell
+        filled_boxes = torch.zeros(
+            (grid_size, grid_size, num_boxes), dtype=torch.int64)
+
+        for idx in range(len(x_center_array)):
+            x_center = x_center_array[idx]
+            y_center = y_center_array[idx]
+            width = width_array[idx]
+            height = height_array[idx]
+            label_index = int(names[idx])
+
+            # Determine grid cell indices
+            grid_x = int(x_center * grid_size)
+            grid_y = int(y_center * grid_size)
+
+            # X and Y coordinates relative to the grid cell
+            x_coord = x_center * grid_size - grid_x
+            y_coord = y_center * grid_size - grid_y
+
+            # Box coordinates relative to the grid cell
+            box_coordinates = torch.tensor(
+                [x_coord, y_coord, width, height])
+
+            # Assign to the first available bounding box in this cell
+            for b in range(num_boxes):
+                if filled_boxes[grid_y, grid_x, b] == 0:
+                    box_index = b * 5  # 5 parameters per box
+                    target_tensor[box_index:box_index + 4,
+                                  grid_y, grid_x] = box_coordinates
+                    target_tensor[box_index + 4, grid_y,
+                                  grid_x] = 1  # Objectness score
+                    filled_boxes[grid_y, grid_x, b] += 1
+                    break
+
+            # Shared class probabilities for this grid cell
+            # Reset class probabilities
+            target_tensor[num_boxes * 5:, grid_y, grid_x] = 0
+            target_tensor[num_boxes * 5 + label_index,
+                          grid_y, grid_x] = 1  # Set class probability
+
+        targets.append(target_tensor)
+
+    images = torch.stack(images)
+    targets = torch.stack(targets)
+
+    return images, targets
 
 
 class PreprocessedVOCDataset(Dataset):
@@ -109,40 +180,48 @@ def get_datasets(base_dir):
 
 def get_data_loaders(data_dir, batch_size=BATCH_SIZE, num_workers=4):
     train_dataset, val_dataset, test_dataset = get_datasets(data_dir)
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size,
+                              shuffle=True, num_workers=num_workers, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size,
+                            shuffle=False, num_workers=num_workers, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size,
+                             shuffle=False, num_workers=num_workers, collate_fn=collate_fn)
     return train_loader, val_loader, test_loader
 
 
 # train_utils.py
 
 
-def train_model(model, train_loader, validation_loader, model_output_dir, num_epochs=NUM_EPOCHS, loss_function=None):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def train_model(model, train_loader, validation_loader, model_output_dir, accelerator, num_epochs=10, loss_function=None, hook=None):
+    device = accelerator.device
     print(f"Training on device '{device}'.")
     if loss_function is None:
         raise ValueError("A loss function must be provided.")
-    optimizer = torch.optim.SGD(model.parameters(
-    ), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, momentum=MOMENTUM)
+
+    optimizer = torch.optim.SGD(
+        model.parameters(), lr=0.001, weight_decay=5e-4, momentum=0.90)
     model.to(device)
+
     train_losses = []
     val_losses = []
     for epoch in range(num_epochs):
         model.train()
+        # Set debugger mode for training
+        if hook is not None:
+            hook.set_mode(smd.modes.TRAIN)
         total_loss = 0
-        for g in optimizer.param_groups:
-            if epoch > 0 and epoch <= 5:
-                g['lr'] = 0.00001 + (0.00009/5) * epoch
-            elif epoch <= 80 and epoch > 5:
-                g['lr'] = 0.0001
-            elif epoch <= 110 and epoch > 80:
-                g['lr'] = 0.00001
-            elif epoch > 110:
-                g['lr'] = 0.000001
+
+        # Adjust learning rate schedule
+        # for g in optimizer.param_groups:
+        #     if epoch > 0 and epoch <= 5:
+        #         g['lr'] = 0.00001 + (0.00009/5) * epoch
+        #     elif epoch <= 80 and epoch > 5:
+        #         g['lr'] = 0.0001
+        #     elif epoch <= 110 and epoch > 80:
+        #         g['lr'] = 0.00001
+        #     elif epoch > 110:
+        #         g['lr'] = 0.000001
+
         progress_bar = tqdm(
             train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False)
         for images, targets in progress_bar:
@@ -151,27 +230,37 @@ def train_model(model, train_loader, validation_loader, model_output_dir, num_ep
             optimizer.zero_grad()
             outputs = model(images)
             loss = loss_function(outputs, targets)
-            loss.backward()
-            clip_grad_norm_(model.parameters(), max_norm=1.0)
+            accelerator.backward(loss)
             optimizer.step()
-            total_loss += loss.item()
-            progress_bar.set_postfix(train_loss=total_loss/len(train_loader))
+
+            # Record the training loss with SM Debugger.
+            if hook is not None:
+                hook.record_tensor_value("train_loss", loss)
+
+            item_loss = loss.item()
+            total_loss += item_loss
+            progress_bar.set_postfix(train_loss=item_loss)
         avg_train_loss = total_loss / len(train_loader)
         train_losses.append(avg_train_loss)
-        avg_val_loss = validate(
-            model, validation_loader, loss_function, device)
+
+        avg_val_loss = validate(model, validation_loader,
+                                loss_function, hook)
         val_losses.append(avg_val_loss)
         print(
             f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}")
+
+        # Save model if validation loss improves.
         if epoch == 0 or avg_val_loss < min(val_losses[:-1]):
             model_path = os.path.join(
                 model_output_dir, f'model_{int(time.time())}.pth')
-            torch.save(model.state_dict(), model_path)
+            accelerator.save(model.state_dict(), model_path)
     return model
 
 
-def validate(model, validation_loader, loss_function, device):
+def validate(model, validation_loader, loss_function, device, hook=None):
     model.eval()
+    if hook is not None:
+        hook.set_mode(smd.modes.EVAL)
     total_loss = 0
     progress_bar = tqdm(validation_loader, desc="Validating", leave=False)
     with torch.no_grad():
@@ -180,9 +269,13 @@ def validate(model, validation_loader, loss_function, device):
             targets = targets.to(device)
             outputs = model(images)
             loss = loss_function(outputs, targets)
-            total_loss += loss.item()
-            progress_bar.set_postfix(
-                val_loss=total_loss/len(validation_loader))
+            item_loss = loss.item()
+            total_loss += item_loss
+
+            # Record the validation loss with SM Debugger.
+            if hook is not None:
+                hook.record_tensor_value("val_loss", loss)
+            progress_bar.set_postfix(val_loss=item_loss)
     return total_loss / len(validation_loader)
 
 
@@ -250,30 +343,76 @@ def update_metrics(matches, scores, pred_labels, gt_labels):
     return tp, fp, scores, pred_labels
 
 
+def decode_ground_truth(target):
+    """
+    Decode ground truth boxes and labels from the target tensor.
+    Assumes target shape is [25, GRID_SIZE, GRID_SIZE] (5 for bbox + 20 for classes).
+    """
+    gt_boxes = []
+    gt_labels = []
+    cell_size = IMAGE_SIZE / GRID_SIZE
+    # Loop over each grid cell
+    for i in range(GRID_SIZE):
+        for j in range(GRID_SIZE):
+            # Check if an object exists in this cell (objectness score is 1)
+            if target[4, i, j] == 1:
+                # Get box coordinates relative to the cell
+                x_cell = target[0, i, j]
+                y_cell = target[1, i, j]
+                w = target[2, i, j]
+                h = target[3, i, j]
+                # Convert to absolute coordinates
+                x_center = (j + x_cell) * cell_size
+                y_center = (i + y_cell) * cell_size
+                x1 = x_center - w * IMAGE_SIZE / 2
+                y1 = y_center - h * IMAGE_SIZE / 2
+                x2 = x_center + w * IMAGE_SIZE / 2
+                y2 = y_center + h * IMAGE_SIZE / 2
+                gt_boxes.append([x1, y1, x2, y2])
+                # Get the class index from the one-hot encoded class probabilities
+                class_probs = target[5:, i, j]
+                gt_labels.append(torch.argmax(class_probs).item())
+    if gt_boxes:
+        gt_boxes = torch.tensor(gt_boxes, dtype=torch.float32)
+    else:
+        gt_boxes = torch.empty((0, 4), dtype=torch.float32)
+    return gt_boxes, np.array(gt_labels)
+
+
 def evaluate_map(model, test_loader, iou_thresh, conf_thresh):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device).eval()
     all_tp, all_conf, all_pred_cls, all_target_cls = [], [], [], []
     with torch.no_grad():
         progress_bar = tqdm(test_loader, desc="Evaluating", leave=False)
-        for images, _ in progress_bar:
+        for images, targets in progress_bar:
             images = images.to(device)
-            predictions = model.detect(
+            predictions_batch = model.detect(
                 images, conf_thresh=conf_thresh, iou_thresh=iou_thresh)
-            for _, detections in enumerate(predictions):
-                gt_boxes = detections[:4, :, :].contiguous().view(-1, 4)
-                gt_labels = torch.nonzero(
-                    detections[4, :, :]).squeeze(1).cpu().numpy()
-                if detections is None:
+            # Process each image in the batch
+            for target, detections in zip(targets, predictions_batch):
+                # Convert the ground truth target (from your collate_fn) to proper boxes and labels
+                gt_boxes, gt_labels = decode_ground_truth(target)
+                # Skip if there are no ground truth boxes
+                if gt_boxes.numel() == 0:
                     continue
-                pred_boxes = detections[:, :4]
-                scores = detections[:, 4]
-                pred_labels = detections[:, 5]
-                iou = calculate_iou(pred_boxes, gt_boxes)
-                matches = match_predictions(iou, iou_thresh)
+                # If no detections, skip this image
+                if len(detections) == 0:
+                    continue
+                # Convert detections (a list) to a tensor
+                det_tensor = torch.tensor(
+                    detections, device=device, dtype=torch.float32)
+                # Extract predicted boxes, scores, and class IDs
+                pred_boxes = det_tensor[:, :4]
+                scores = det_tensor[:, 4]
+                # Note: detections[5] is class_score and detections[6] is class_id
+                pred_labels = det_tensor[:, 6].int()
+                # Compute IoU between each predicted box and each ground truth box
+                iou = calculate_iou(pred_boxes.unsqueeze(0),
+                                    gt_boxes.unsqueeze(0))
                 matches = match_predictions(iou, iou_thresh)
                 tp, _, conf, pred_cls = update_metrics(
-                    matches, scores, pred_labels, gt_labels)
+                    matches, scores.cpu().numpy(), pred_labels.cpu().numpy(), gt_labels)
                 all_tp.append(tp)
                 all_conf.append(conf)
                 all_pred_cls.append(pred_cls)
@@ -291,7 +430,7 @@ def evaluate_map(model, test_loader, iou_thresh, conf_thresh):
     return mean_ap
 
 
-class YOLOLoss(nn.Module):
+class YOLOLoss(nn.modules.loss._Loss):
     def __init__(self, lambda_coord=LAMBDA_COORD, lambda_noobj=LAMBDA_NOOB, lambda_obj=LAMBDA_OBJ, lambda_class=LAMBDA_CLASS):
         super(YOLOLoss, self).__init__()
         self.lambda_coord = lambda_coord
@@ -554,35 +693,51 @@ def parse_args():
 
 def main():
     args = parse_args()
+    accelerator = Accelerator()
 
-    # Load datasets and data loaders (assumes data has been preprocessed if desired)
-    train_dataset, val_dataset, test_dataset = get_datasets(args.data_dir)
-    train_loader, val_loader, test_loader = get_data_loaders(
-        train_dataset, val_dataset, test_dataset)
+    # Create a SageMaker Debugger hook using the configuration provided
+    # by SageMaker (this reads the configuration from the environment).
+    hook = None
+    if accelerator.is_main_process:
+        try:
+            hook = smd.Hook.create_from_json_file()
+        except Exception as e:
+            print("Could not create SM Debugger hook, continuing without debugger:", e)
 
-    # Check for existing weights in the model directory
+    # Load datasets and data loaders.
+    train_loader, val_loader, test_loader = get_data_loaders(args.data_dir)
+
+    # Check for existing weights.
     weights = None
     modelos = sorted(glob.glob(os.path.join(
         args.model_dir, 'model_*.pth')), key=os.path.getmtime)
     if len(modelos) > 0:
         weights = modelos[-1]
 
-    # Initialize model and load weights if available
+    # Initialize model and register it with the debugger hook.
     model = YOLO(num_classes=NUMBER_OF_CLASSES)
+    if hook is not None:
+        hook.register_module(model)
     if weights is not None:
         print(f'Loading weights from {weights}')
         state_dict = torch.load(weights)
         model.load_state_dict(state_dict)
 
-    # Define loss function
+    # Define loss function and register it with the hook.
     loss_function = YOLOLoss()
+    if hook is not None:
+        hook.register_loss(loss_function)
 
-    # Train the model
-    model = train_model(model, train_loader, val_loader, args.model_dir,
-                        num_epochs=args.epochs, loss_function=loss_function)
+    # Prepare the model for training with acceleration.
+    model, train_loader, val_loader, test_loader = accelerator.prepare(
+        model, train_loader, val_loader, test_loader)
+
+    # Train the model (passing the hook so that training metrics are captured)
+    model = train_model(model, train_loader, val_loader, args.model_dir, accelerator,
+                        num_epochs=args.epochs, loss_function=loss_function, hook=hook)
     model.eval()
 
-    # Evaluate the model on the test dataset
+    # Evaluate the model on the test dataset.
     print("Evaluating model on test dataset...")
     evaluate_map(model, test_loader, iou_thresh=0.5, conf_thresh=0.5)
 

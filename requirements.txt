@@ -1,0 +1,2 @@
+accelerate==1.4.0
+smdebug==1.0.34
