@@ -3,6 +3,7 @@
 import argparse
 import glob
 import os
+import subprocess
 import time
 
 import torch
@@ -53,6 +54,19 @@ VOC_LABELS = {
 
 # Derived constants
 CLASS_LABELS = list(VOC_LABELS.keys())
+
+
+def create_ramdisk(mount_point, size):
+    # Ensure the mount point exists
+    os.makedirs(mount_point, exist_ok=True)
+
+    # Build the mount command; 'tmpfs' is used to create a ramdisk.
+    command = ['sudo', 'mount', '-t', 'tmpfs',
+               '-o', f'size={size}', 'tmpfs', mount_point]
+
+    # Execute the command
+    subprocess.run(command, check=True)
+    print(f"Ramdisk mounted at {mount_point} with size {size}")
 
 
 def collate_fn(batch):
@@ -700,11 +714,9 @@ def main():
         except Exception as e:
             print("Could not create SM Debugger hook, continuing without debugger:", e)
 
-    # Create a temp dir for the dataset
-    temp_dir = os.path.join('/tmp', 'data')
-    if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir)
-        print(f"Created temp dir {temp_dir}")
+    # Create a ramdisk to store the datasets.
+    temp_dir = '/tmp/ramdisk'
+    create_ramdisk(temp_dir, '10G')
 
     # Uncompress datasets files
     for filename in os.listdir(args.data_dir):
